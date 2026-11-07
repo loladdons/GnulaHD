@@ -1,7 +1,7 @@
 {
   "id": "gnulahd",
   "name": "GnulaHD",
-  "version": "8.0.0-app",
+  "version": "0.0.1",
   "description": "Películas, series y anime en HD (GnulaHD). Home con slider Destacados, filas de catálogo, Descubrir (grillas Películas/Series/Anime), búsqueda y servidores Vidara/Savefiles.",
   "author": "adaptado",
   "entry": "plugin.js",
