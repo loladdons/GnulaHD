@@ -69,6 +69,112 @@
 var BASE_URL = "https://ww3.gnulahd.nu";
 var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+var TMDB_KEY = "a2d9bbed370d9f678e34006f8750a5a5";
+var TMDB_LANG = "es-MX";
+var TMDB_IMG = "https://image.tmdb.org/t/p/";
+
+async function tmdbGet(path, params) {
+  params = params || {};
+  var q = [];
+  q.push("api_key=" + encodeURIComponent(TMDB_KEY));
+  q.push("language=" + encodeURIComponent(TMDB_LANG));
+  for (var k in params) {
+    if (params[k] != null && params[k] !== "") q.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(params[k])));
+  }
+  var url = "https://api.themoviedb.org/3" + path + "?" + q.join("&");
+  try {
+    var res = await kino.fetch(url, {
+      headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+      timeoutMs: 12000,
+    });
+    if (!res || !res.ok) return null;
+    return res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+function tmdbImg(path, size) {
+  if (!path) return null;
+  if (String(path).indexOf("http") === 0) return path;
+  return TMDB_IMG + (size || "w500") + path;
+}
+
+function cleanTitleForTmdb(title) {
+  return String(title || "")
+    .replace(/\(\d{4}\)/g, "")
+    .replace(/\b(latino|castellano|subtitulado|sub\s*esp|hd|1080p|720p|4k)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function tmdbFind(title, kind, year) {
+  var q = cleanTitleForTmdb(title);
+  if (!q || q.length < 2) return null;
+  var isMovie = String(kind || "").toLowerCase() === "movie" || String(kind || "").toLowerCase() === "pelicula";
+  var path = isMovie ? "/search/movie" : "/search/tv";
+  var params = { query: q, include_adult: "false" };
+  if (year) params.year = String(year);
+  var data = await tmdbGet(path, params);
+  if (!data || !Array.isArray(data.results) || !data.results.length) {
+    // reintento sin año
+    if (year) {
+      data = await tmdbGet(path, { query: q, include_adult: "false" });
+    }
+  }
+  if (!data || !Array.isArray(data.results) || !data.results.length) {
+    // si falló como serie, probar película y viceversa
+    var alt = isMovie ? "/search/tv" : "/search/movie";
+    data = await tmdbGet(alt, { query: q, include_adult: "false" });
+    if (data && data.results && data.results.length) {
+      isMovie = !isMovie;
+    }
+  }
+  if (!data || !data.results || !data.results.length) return null;
+  var r = data.results[0];
+  return {
+    tmdbId: r.id,
+    isMovie: isMovie || !!r.title,
+    title: r.title || r.name || q,
+    overview: r.overview || "",
+    poster: tmdbImg(r.poster_path, "w500"),
+    backdrop: tmdbImg(r.backdrop_path, "w780"),
+    year: (r.release_date || r.first_air_date || "").slice(0, 4) || null,
+    rating: r.vote_average != null ? Math.round(r.vote_average * 10) / 10 : null,
+  };
+}
+
+async function tmdbTvDetail(tmdbId) {
+  if (!tmdbId) return null;
+  return tmdbGet("/tv/" + tmdbId, {});
+}
+
+async function tmdbSeasonEpisodes(tmdbId, seasonNum) {
+  if (!tmdbId) return [];
+  var data = await tmdbGet("/tv/" + tmdbId + "/season/" + seasonNum, {});
+  if (!data || !Array.isArray(data.episodes)) return [];
+  return data.episodes.map(function (ep) {
+    return {
+      number: ep.episode_number,
+      title: ep.name || ("Episodio " + ep.episode_number),
+      overview: ep.overview || "",
+      still: tmdbImg(ep.still_path, "w300"),
+      airDate: ep.air_date || null,
+      runtime: ep.runtime || null,
+    };
+  });
+}
+
+function absUrl(u) {
+  u = String(u || "").trim();
+  if (!u) return "";
+  if (u.indexOf("//") === 0) return "https:" + u;
+  if (/^https?:\/\//i.test(u)) return u;
+  if (u.charAt(0) === "/") return BASE_URL + u;
+  return BASE_URL + "/" + u;
+}
+
+
 function gnrdUnpack(s) {
   try {
     var b = atob(s);
@@ -143,11 +249,11 @@ function parseCards(html, defaultKind) {
     else if (href.indexOf("/ver/peliculas/") >= 0) kind = "movie";
     cards.push({
       id: id,
-      ref: href.charAt(0) === "/" ? BASE_URL + href : href,
+      ref: absUrl(href),
       title: title,
       kind: kind,
       type: kind === "movie" ? "movie" : "series",
-      poster: poster,
+      poster: absUrl(poster),
       rating: rating,
       year: year,
       badges: badges.slice(0, 3),
@@ -189,13 +295,13 @@ function parseHeroSlides(html) {
     var id = cleanId(slugMatch ? slugMatch[1] : ref);
     slides.push({
       id: id,
-      ref: ref,
+      ref: absUrl(ref),
       title: title,
       kind: kind,
       type: kind,
-      backdrop: backdrop,
-      poster: backdrop || logo,
-      logo: logo,
+      backdrop: absUrl(backdrop),
+      poster: absUrl(backdrop || logo),
+      logo: absUrl(logo),
       overview: overview,
       year: year,
       rating: rating,
@@ -323,6 +429,26 @@ async function kinoHome() {
   rows.push({ id: "anime", title: "Anime Reciente", ref: "anime", items: animeItems });
   if (terrorItems.length) rows.push({ id: "terror", title: "Terror · Top Semanal", ref: "genres/terror", items: terrorItems });
   if (accionItems.length) rows.push({ id: "accion", title: "Acción · Top Semanal", ref: "genres/accion", items: accionItems });
+  // Enriquecer con TMDB solo tarjetas sin poster (máx 12, no bloquea el home entero)
+  try {
+    var need = [];
+    rows.forEach(function (row) {
+      (row.items || []).forEach(function (it) {
+        if (it && !it.poster && need.length < 12) need.push(it);
+      });
+    });
+    for (var ni = 0; ni < need.length; ni++) {
+      try {
+        var tm = await tmdbFind(need[ni].title, need[ni].kind || need[ni].type, need[ni].year);
+        if (tm) {
+          if (tm.poster) need[ni].poster = tm.poster;
+          if (tm.backdrop) need[ni].backdrop = tm.backdrop;
+          if (tm.overview) need[ni].overview = tm.overview;
+          if (tm.year && !need[ni].year) need[ni].year = tm.year;
+        }
+      } catch (e) {}
+    }
+  } catch (e) {}
   return rows;
 }
 
@@ -379,8 +505,7 @@ async function kinoEpisodes(ref) {
     var innerHtml = match[1];
     var hrefMatch = fullTag.match(/href="([^"]+)"/);
     if (!hrefMatch) continue;
-    var href = hrefMatch[1];
-    if (href.charAt(0) === "/") href = BASE_URL + href;
+    var href = absUrl(hrefMatch[1]);
     var sMatch = fullTag.match(/data-s="([^"]+)"/);
     var eMatch = fullTag.match(/data-e="([^"]+)"/);
     var idMatch = fullTag.match(/data-id="([^"]+)"/);
@@ -451,6 +576,7 @@ async function kinoResolve(ref) {
   });
 
   var servers = [];
+  var embeds = [];
   for (var li = 0; li < sortedLangs.length; li++) {
     var l = sortedLangs[li];
     if (!l || !Array.isArray(l.servers)) continue;
@@ -458,20 +584,33 @@ async function kinoResolve(ref) {
       var s = l.servers[si];
       var src = (s && s.src) || "";
       if (!src) continue;
+      src = absUrl(src);
       var streamObj = null;
-      if (src.indexOf("vidara") >= 0) streamObj = await resolveVidara(src);
-      else if (src.indexOf("savefiles") >= 0) streamObj = await resolveSavefiles(src);
+      try {
+        if (/vidara/i.test(src)) streamObj = await resolveVidara(src);
+        else if (/savefiles/i.test(src)) streamObj = await resolveSavefiles(src);
+      } catch (e) {}
       if (streamObj && streamObj.url) {
         servers.push({
           name: (s.title || "Servidor") + " (" + (l.label || "Video") + ")",
           url: streamObj.url,
-          quality: streamObj.mime && streamObj.mime.indexOf("mpegURL") >= 0 ? "HLS" : "HD",
-          isHls: !!(streamObj.mime && streamObj.mime.indexOf("mpegURL") >= 0) || /\.m3u8/i.test(streamObj.url),
+          quality: streamObj.mime && String(streamObj.mime).indexOf("mpegURL") >= 0 ? "HLS" : "HD",
+          isHls: !!(streamObj.mime && String(streamObj.mime).indexOf("mpegURL") >= 0) || /\.m3u8/i.test(streamObj.url),
           headers: streamObj.headers || {},
+        });
+      } else if (/^https?:\/\//i.test(src)) {
+        embeds.push({
+          name: (s.title || "Embed") + " (" + (l.label || "Video") + ")",
+          url: src,
+          quality: l.label || "HD",
+          isHls: /\.m3u8/i.test(src),
+          headers: { Referer: BASE_URL + "/", "User-Agent": USER_AGENT },
         });
       }
     }
   }
+  // Si no hubo stream directo, devolver embeds (algunos players los abren)
+  if (!servers.length && embeds.length) return embeds;
   return servers;
 }
 
@@ -581,136 +720,510 @@ async function appSearch(query) {
   }
 }
 
-async function getDiscover(opts) {
+
+var DISCOVER_GENRES = [
+  { id: "genres/drama", value: "genres/drama", label: "Drama", title: "Drama" },
+  { id: "genres/accion", value: "genres/accion", label: "Acción", title: "Acción" },
+  { id: "genres/comedia", value: "genres/comedia", label: "Comedia", title: "Comedia" },
+  { id: "genres/terror", value: "genres/terror", label: "Terror", title: "Terror" },
+  { id: "genres/romance", value: "genres/romance", label: "Romance", title: "Romance" },
+  { id: "genres/suspenso", value: "genres/suspenso", label: "Suspenso", title: "Suspenso" },
+  { id: "genres/ciencia-ficcion", value: "genres/ciencia-ficcion", label: "Ciencia ficción", title: "Ciencia ficción" },
+  { id: "genres/animacion", value: "genres/animacion", label: "Animación", title: "Animación" },
+  { id: "genres/aventura", value: "genres/aventura", label: "Aventura", title: "Aventura" },
+  { id: "genres/crimen", value: "genres/crimen", label: "Crimen", title: "Crimen" },
+  { id: "genres/familia", value: "genres/familia", label: "Familia", title: "Familia" },
+  { id: "genres/fantasia", value: "genres/fantasia", label: "Fantasía", title: "Fantasía" },
+  { id: "genres/misterio", value: "genres/misterio", label: "Misterio", title: "Misterio" },
+  { id: "genres/thriller", value: "genres/thriller", label: "Thriller", title: "Thriller" },
+  { id: "genres/documental", value: "genres/documental", label: "Documental", title: "Documental" },
+  { id: "genres/historia", value: "genres/historia", label: "Historia", title: "Historia" },
+  { id: "genres/musica", value: "genres/musica", label: "Música", title: "Música" },
+  { id: "genres/belica", value: "genres/belica", label: "Bélica", title: "Bélica" },
+  { id: "genres/oeste", value: "genres/oeste", label: "Oeste", title: "Oeste" },
+  { id: "genres/telenovela", value: "genres/telenovela", label: "Telenovela", title: "Telenovela" },
+  { id: "genres/reality", value: "genres/reality", label: "Reality", title: "Reality" },
+  { id: "genres/ninos", value: "genres/ninos", label: "Niños", title: "Niños" },
+  { id: "genres/pelicula-de-tv", value: "genres/pelicula-de-tv", label: "Película de TV", title: "Película de TV" },
+  { id: "genres/accion-y-aventura", value: "genres/accion-y-aventura", label: "Acción y aventura", title: "Acción y aventura" },
+  { id: "genres/ciencia-ficcion-y-fantasia", value: "genres/ciencia-ficcion-y-fantasia", label: "Ciencia ficción y fantasía", title: "Ciencia ficción y fantasía" },
+  { id: "genres/guerra-y-politica", value: "genres/guerra-y-politica", label: "Guerra y política", title: "Guerra y política" }
+];
+var DISCOVER_TAGS = [
+  { id: "tag/adolescence", value: "tag/adolescence", label: "Tag: Adolescencia", title: "Adolescencia" },
+  { id: "tag/adult-animation", value: "tag/adult-animation", label: "Tag: Animación adulta", title: "Animación adulta" },
+  { id: "tag/airplane", value: "tag/airplane", label: "Tag: Aviones", title: "Aviones" },
+  { id: "tag/alcoholism", value: "tag/alcoholism", label: "Tag: Alcoholismo", title: "Alcoholismo" },
+  { id: "tag/alien-invasion", value: "tag/alien-invasion", label: "Tag: Invasión alienígena", title: "Invasión alienígena" },
+  { id: "tag/amistad", value: "tag/amistad", label: "Tag: Amistad", title: "Amistad" },
+  { id: "tag/animals", value: "tag/animals", label: "Tag: Animales", title: "Animales" },
+  { id: "tag/anthology", value: "tag/anthology", label: "Tag: Antología", title: "Antología" },
+  { id: "tag/anti-hero", value: "tag/anti-hero", label: "Tag: Antiheroe", title: "Antiheroe" },
+  { id: "tag/apocalypse", value: "tag/apocalypse", label: "Tag: Apocalipsis", title: "Apocalipsis" },
+  { id: "tag/autism", value: "tag/autism", label: "Tag: Autismo", title: "Autismo" },
+  { id: "tag/based-on-comic", value: "tag/based-on-comic", label: "Tag: Basado en cómic", title: "Basado en cómic" },
+  { id: "tag/based-on-true-story", value: "tag/based-on-true-story", label: "Tag: Basado en hechos reales", title: "Basado en hechos reales" },
+  { id: "tag/based-on-video-game", value: "tag/based-on-video-game", label: "Tag: Basado en videojuego", title: "Basado en videojuego" },
+  { id: "tag/biography", value: "tag/biography", label: "Tag: Biografía", title: "Biografía" },
+  { id: "tag/black-and-white", value: "tag/black-and-white", label: "Tag: Blanco y negro", title: "Blanco y negro" },
+  { id: "tag/boxing", value: "tag/boxing", label: "Tag: Boxeo", title: "Boxeo" },
+  { id: "tag/buddy-comedy", value: "tag/buddy-comedy", label: "Tag: Comedia de amigos", title: "Comedia de amigos" },
+  { id: "tag/buddy-cop", value: "tag/buddy-cop", label: "Tag: Policías compañeros", title: "Policías compañeros" },
+  { id: "tag/china", value: "tag/china", label: "Tag: China", title: "China" },
+  { id: "tag/christian-film", value: "tag/christian-film", label: "Tag: Cine cristiano", title: "Cine cristiano" },
+  { id: "tag/christmas", value: "tag/christmas", label: "Tag: Navidad", title: "Navidad" },
+  { id: "tag/coming-of-age", value: "tag/coming-of-age", label: "Tag: Crecimiento personal", title: "Crecimiento personal" },
+  { id: "tag/cyberpunk", value: "tag/cyberpunk", label: "Tag: Cyberpunk", title: "Cyberpunk" },
+  { id: "tag/dark-comedy", value: "tag/dark-comedy", label: "Tag: Comedia negra", title: "Comedia negra" },
+  { id: "tag/deportes", value: "tag/deportes", label: "Tag: Deportes", title: "Deportes" },
+  { id: "tag/detective", value: "tag/detective", label: "Tag: Detective", title: "Detective" },
+  { id: "tag/disability", value: "tag/disability", label: "Tag: Discapacidad", title: "Discapacidad" },
+  { id: "tag/disaster", value: "tag/disaster", label: "Tag: Desastre", title: "Desastre" },
+  { id: "tag/documentary", value: "tag/documentary", label: "Tag: Documental", title: "Documental" },
+  { id: "tag/dragon", value: "tag/dragon", label: "Tag: Dragones", title: "Dragones" },
+  { id: "tag/drugs", value: "tag/drugs", label: "Tag: Drogas", title: "Drogas" },
+  { id: "tag/dystopia", value: "tag/dystopia", label: "Tag: Distopía", title: "Distopía" },
+  { id: "tag/epic", value: "tag/epic", label: "Tag: Épica", title: "Épica" },
+  { id: "tag/escape", value: "tag/escape", label: "Tag: Escape", title: "Escape" },
+  { id: "tag/ex-con", value: "tag/ex-con", label: "Tag: Ex convictos", title: "Ex convictos" },
+  { id: "tag/exorcism", value: "tag/exorcism", label: "Tag: Exorcismo", title: "Exorcismo" },
+  { id: "tag/fairy-tale", value: "tag/fairy-tale", label: "Tag: Cuento de hadas", title: "Cuento de hadas" },
+  { id: "tag/film-in-film", value: "tag/film-in-film", label: "Tag: Cine dentro del cine", title: "Cine dentro del cine" },
+  { id: "tag/forest", value: "tag/forest", label: "Tag: Bosque", title: "Bosque" },
+  { id: "tag/found-footage", value: "tag/found-footage", label: "Tag: Found Footage", title: "Found Footage" },
+  { id: "tag/gangster", value: "tag/gangster", label: "Tag: Gangster", title: "Gangster" },
+  { id: "tag/gay-theme", value: "tag/gay-theme", label: "Tag: Temática gay", title: "Temática gay" },
+  { id: "tag/gore", value: "tag/gore", label: "Tag: Gore", title: "Gore" },
+  { id: "tag/gothic", value: "tag/gothic", label: "Tag: Gothic", title: "Gothic" },
+  { id: "tag/hacker", value: "tag/hacker", label: "Tag: Hacker", title: "Hacker" },
+  { id: "tag/halloween", value: "tag/halloween", label: "Tag: Halloween", title: "Halloween" },
+  { id: "tag/haunted-house", value: "tag/haunted-house", label: "Tag: Haunted House", title: "Haunted House" },
+  { id: "tag/heist", value: "tag/heist", label: "Tag: Heist", title: "Heist" },
+  { id: "tag/hitman", value: "tag/hitman", label: "Tag: Hitman", title: "Hitman" },
+  { id: "tag/hong-kong", value: "tag/hong-kong", label: "Tag: Hong Kong", title: "Hong Kong" },
+  { id: "tag/independent-film", value: "tag/independent-film", label: "Tag: Independent Film", title: "Independent Film" },
+  { id: "tag/india", value: "tag/india", label: "Tag: India", title: "India" },
+  { id: "tag/island", value: "tag/island", label: "Tag: Island", title: "Island" },
+  { id: "tag/japan", value: "tag/japan", label: "Tag: Japan", title: "Japan" },
+  { id: "tag/journalist", value: "tag/journalist", label: "Tag: Journalist", title: "Journalist" },
+  { id: "tag/kidnapping", value: "tag/kidnapping", label: "Tag: Secuestro", title: "Secuestro" },
+  { id: "tag/lawyer", value: "tag/lawyer", label: "Tag: Lawyer", title: "Lawyer" },
+  { id: "tag/lgbt", value: "tag/lgbt", label: "Tag: LGBT", title: "LGBT" },
+  { id: "tag/martial-arts", value: "tag/martial-arts", label: "Tag: Artes marciales", title: "Artes marciales" },
+  { id: "tag/mockumentary", value: "tag/mockumentary", label: "Tag: Mockumentary", title: "Mockumentary" },
+  { id: "tag/musical", value: "tag/musical", label: "Tag: Musical", title: "Musical" },
+  { id: "tag/nature", value: "tag/nature", label: "Tag: Nature", title: "Nature" },
+  { id: "tag/nazi", value: "tag/nazi", label: "Tag: Nazi", title: "Nazi" },
+  { id: "tag/neo-noir", value: "tag/neo-noir", label: "Tag: Neo Noir", title: "Neo Noir" },
+  { id: "tag/parody", value: "tag/parody", label: "Tag: Parody", title: "Parody" },
+  { id: "tag/police", value: "tag/police", label: "Tag: Police", title: "Police" },
+  { id: "tag/politics", value: "tag/politics", label: "Tag: Politics", title: "Politics" },
+  { id: "tag/possession", value: "tag/possession", label: "Tag: Possession", title: "Possession" },
+  { id: "tag/post-apocalyptic-future", value: "tag/post-apocalyptic-future", label: "Tag: Post Apocalyptic Future", title: "Post Apocalyptic Future" },
+  { id: "tag/prison", value: "tag/prison", label: "Tag: Prison", title: "Prison" },
+  { id: "tag/psychological-thriller", value: "tag/psychological-thriller", label: "Tag: Psychological Thriller", title: "Psychological Thriller" },
+  { id: "tag/psychopath", value: "tag/psychopath", label: "Tag: Psychopath", title: "Psychopath" },
+  { id: "tag/racism", value: "tag/racism", label: "Tag: Racism", title: "Racism" },
+  { id: "tag/religion", value: "tag/religion", label: "Tag: Religion", title: "Religion" },
+  { id: "tag/revenge", value: "tag/revenge", label: "Tag: Venganza", title: "Venganza" },
+  { id: "tag/road-movie", value: "tag/road-movie", label: "Tag: Road Movie", title: "Road Movie" },
+  { id: "tag/road-trip", value: "tag/road-trip", label: "Tag: Road Trip", title: "Road Trip" },
+  { id: "tag/robbery", value: "tag/robbery", label: "Tag: Robbery", title: "Robbery" },
+  { id: "tag/romcom", value: "tag/romcom", label: "Tag: Romcom", title: "Romcom" },
+  { id: "tag/santa-claus", value: "tag/santa-claus", label: "Tag: Santa Claus", title: "Santa Claus" },
+  { id: "tag/satire", value: "tag/satire", label: "Tag: Satire", title: "Satire" },
+  { id: "tag/secret-agent", value: "tag/secret-agent", label: "Tag: Secret Agent", title: "Secret Agent" },
+  { id: "tag/serial-killer", value: "tag/serial-killer", label: "Tag: Asesino en serie", title: "Asesino en serie" },
+  { id: "tag/slasher", value: "tag/slasher", label: "Tag: Slasher", title: "Slasher" },
+  { id: "tag/slavery", value: "tag/slavery", label: "Tag: Slavery", title: "Slavery" },
+  { id: "tag/social-media", value: "tag/social-media", label: "Tag: Social Media", title: "Social Media" },
+  { id: "tag/south-korea", value: "tag/south-korea", label: "Tag: South Korea", title: "South Korea" },
+  { id: "tag/spy", value: "tag/spy", label: "Tag: Spy", title: "Spy" },
+  { id: "tag/steampunk", value: "tag/steampunk", label: "Tag: Steampunk", title: "Steampunk" },
+  { id: "tag/stop-motion", value: "tag/stop-motion", label: "Tag: Stop Motion", title: "Stop Motion" },
+  { id: "tag/superheroe", value: "tag/superheroe", label: "Tag: Superheroe", title: "Superheroe" },
+  { id: "tag/surrealism", value: "tag/surrealism", label: "Tag: Surrealism", title: "Surrealism" },
+  { id: "tag/survival", value: "tag/survival", label: "Tag: Survival", title: "Survival" },
+  { id: "tag/suspense", value: "tag/suspense", label: "Tag: Suspense", title: "Suspense" },
+  { id: "tag/sword-and-sorcery", value: "tag/sword-and-sorcery", label: "Tag: Sword And Sorcery", title: "Sword And Sorcery" },
+  { id: "tag/teacher", value: "tag/teacher", label: "Tag: Teacher", title: "Teacher" },
+  { id: "tag/terrorism", value: "tag/terrorism", label: "Tag: Terrorism", title: "Terrorism" },
+  { id: "tag/thailand", value: "tag/thailand", label: "Tag: Thailand", title: "Thailand" },
+  { id: "tag/torture", value: "tag/torture", label: "Tag: Torture", title: "Torture" },
+  { id: "tag/vampire", value: "tag/vampire", label: "Tag: Vampiros", title: "Vampiros" },
+  { id: "tag/viaje-en-el-tiempo", value: "tag/viaje-en-el-tiempo", label: "Tag: Viaje En El Tiempo", title: "Viaje En El Tiempo" },
+  { id: "tag/virus", value: "tag/virus", label: "Tag: Virus", title: "Virus" },
+  { id: "tag/wedding", value: "tag/wedding", label: "Tag: Wedding", title: "Wedding" },
+  { id: "tag/werewolf", value: "tag/werewolf", label: "Tag: Werewolf", title: "Werewolf" },
+  { id: "tag/witch", value: "tag/witch", label: "Tag: Witch", title: "Witch" },
+  { id: "tag/world-war-ii", value: "tag/world-war-ii", label: "Tag: Segunda Guerra Mundial", title: "Segunda Guerra Mundial" },
+  { id: "tag/zombie", value: "tag/zombie", label: "Tag: Zombies", title: "Zombies" }
+];
+var DISCOVER_YEARS = [
+  { id: "", value: "", label: "Todos los años", title: "Todos los años" },
+  { id: "2026", value: "2026", label: "2026", title: "2026" },
+  { id: "2025", value: "2025", label: "2025", title: "2025" },
+  { id: "2024", value: "2024", label: "2024", title: "2024" },
+  { id: "2023", value: "2023", label: "2023", title: "2023" },
+  { id: "2022", value: "2022", label: "2022", title: "2022" },
+  { id: "2021", value: "2021", label: "2021", title: "2021" },
+  { id: "2020", value: "2020", label: "2020", title: "2020" },
+  { id: "2019", value: "2019", label: "2019", title: "2019" },
+  { id: "2018", value: "2018", label: "2018", title: "2018" },
+  { id: "2017", value: "2017", label: "2017", title: "2017" },
+  { id: "2016", value: "2016", label: "2016", title: "2016" }
+];
+var DISCOVER_TYPES = [
+  { id: "", value: "", label: "Todos", title: "Todos" },
+  { id: "peliculas", value: "peliculas", label: "Películas", title: "Películas" },
+  { id: "series", value: "series", label: "Series", title: "Series" },
+  { id: "anime", value: "anime", label: "Anime", title: "Anime" },
+];
+
+function buildDiscoverUrl(opts) {
   opts = opts || {};
+  var type = String(opts.type || opts.filter || opts.tipo || "").trim();
+  var genre = String(opts.genre || opts.genero || opts.category || "").trim();
+  var tag = String(opts.tag || "").trim();
+  var year = String(opts.year || opts.anio || opts.año || "").trim();
   var page = Number(opts.page || 1) || 1;
-  var filter = String(opts.filter || opts.genre || opts.catalogId || opts.type || "peliculas");
-  // Grillas: películas / series / anime
-  var ref = "peliculas";
-  if (/serie/i.test(filter)) ref = "series";
-  else if (/anime/i.test(filter)) ref = "anime";
-  else if (/terror/i.test(filter)) ref = "genres/terror";
-  else if (/accion|acción/i.test(filter)) ref = "genres/accion";
-  else if (/pel|movie/i.test(filter)) ref = "peliculas";
-  else if (filter && filter !== "all") ref = filter;
-  try {
-    var br = await kinoBrowse(ref, String(page));
-    return {
-      items: (br.items || []).map(mapItem).filter(Boolean),
-      hasMore: !!br.next,
-    };
-  } catch (e) {
-    return { items: [], hasMore: false };
+
+  var path = "";
+  if (genre.indexOf("tag/") === 0) {
+    path = "/tag/" + genre.slice(4).replace(/\/$/, "") + "/";
+  } else if (genre.indexOf("genres/") === 0) {
+    path = "/genres/" + genre.slice(7).replace(/\/$/, "") + "/";
+  } else if (tag) {
+    path = "/tag/" + tag.replace(/^tag\//, "").replace(/\/$/, "") + "/";
+  } else if (genre) {
+    path = "/genres/" + genre.replace(/^genres\//, "").replace(/\/$/, "") + "/";
+  } else if (type === "series") {
+    path = "/ver/series/";
+  } else if (type === "anime") {
+    path = "/ver/anime/";
+  } else if (type === "peliculas") {
+    path = "/ver/peliculas/";
+  } else {
+    path = "/ver/peliculas/";
   }
+
+  if (page > 1) {
+    path = path.replace(/\/?$/, "/") + "page/" + page + "/";
+  }
+
+  var qs = [];
+  if (type && path.indexOf("/ver/") !== 0) qs.push("type=" + encodeURIComponent(type));
+  if (year) qs.push("anio=" + encodeURIComponent(year));
+  var url = BASE_URL + path;
+  if (qs.length) url += "?" + qs.join("&");
+  return url;
 }
 
-async function getDiscoverFilters() {
+async function getDiscoverFilters(opts) {
+  // 3 filtros: tipo, género (géneros + tags), año
+  var genreOpts = [{ id: "", value: "", label: "Todos los géneros", title: "Todos los géneros" }]
+    .concat(DISCOVER_GENRES)
+    .concat(DISCOVER_TAGS);
   return [
-    { id: "peliculas", label: "Películas", title: "Películas" },
-    { id: "series", label: "Series", title: "Series" },
-    { id: "anime", label: "Anime", title: "Anime" },
-    { id: "genres/terror", label: "Terror", title: "Terror" },
-    { id: "genres/accion", label: "Acción", title: "Acción" },
+    {
+      id: "type",
+      key: "type",
+      name: "type",
+      label: "Tipo",
+      title: "Tipo",
+      type: "select",
+      options: DISCOVER_TYPES,
+    },
+    {
+      id: "genre",
+      key: "genre",
+      name: "genre",
+      label: "Género / Tag",
+      title: "Género / Tag",
+      type: "select",
+      options: genreOpts,
+    },
+    {
+      id: "year",
+      key: "year",
+      name: "year",
+      label: "Año",
+      title: "Año",
+      type: "select",
+      options: DISCOVER_YEARS,
+    },
   ];
 }
 
+async function getDiscover(opts) {
+  opts = opts || {};
+  // Aceptar filtros planos o anidados
+  if (opts.filters && typeof opts.filters === "object") {
+    opts = Object.assign({}, opts, opts.filters);
+  }
+  var page = Number(opts.page || 1) || 1;
+  var type = String(opts.type || opts.filter || opts.tipo || "").trim();
+  // compat: filterId antiguo
+  if (!type && opts.filterId) {
+    var fid = String(opts.filterId);
+    if (fid === "peliculas" || fid === "series" || fid === "anime") type = fid;
+    else if (!opts.genre) opts.genre = fid;
+  }
+  var genre = String(opts.genre || opts.genero || opts.category || opts.catalogId || "").trim();
+  var year = String(opts.year || opts.anio || opts.año || "").trim();
+
+  var url = buildDiscoverUrl({
+    type: type,
+    genre: genre,
+    tag: opts.tag,
+    year: year,
+    page: page,
+  });
+  kino.log("discover " + url);
+  try {
+    var html = await fetchHtml(url);
+    var defaultKind = "movie";
+    if (type === "series" || type === "anime") defaultKind = "series";
+    if (genre.indexOf("tag/") === 0 || /\/tag\//.test(url)) {
+      // tags mezclan; parseCards detecta
+    }
+    var items = parseCards(html, defaultKind).map(mapItem).filter(Boolean);
+    // paginación: rel=next o /page/N+1/
+    var hasMore = false;
+    if (new RegExp("/page/" + (page + 1) + "/").test(html)) hasMore = true;
+    if (html.indexOf("page=" + (page + 1)) >= 0) hasMore = true;
+    if (items.length >= 40) hasMore = true;
+    var nextLink = html.match(/rel=["']next["'][^>]*href=["']([^"']+)["']/i);
+    if (nextLink) hasMore = true;
+    return { items: items, hasMore: hasMore, page: page, url: url };
+  } catch (e) {
+    kino.log("getDiscover: " + ((e && e.message) || e));
+    return { items: [], hasMore: false, page: page };
+  }
+}
+
 async function getCatalogs() {
-  return [
+  var list = [
     { id: "peliculas", title: "Películas", type: "movie" },
     { id: "series", title: "Series", type: "series" },
     { id: "anime", title: "Anime", type: "series" },
     { id: "destacados", title: "Destacados", type: "mixed" },
-    { id: "genres/terror", title: "Terror", type: "movie" },
-    { id: "genres/accion", title: "Acción", type: "movie" },
   ];
+  DISCOVER_GENRES.forEach(function (g) {
+    list.push({ id: g.id, title: g.label, type: "mixed" });
+  });
+  return list;
 }
 
 async function getCatalog(catalogId, opts) {
   opts = opts || {};
   var page = Number(opts.page || 1) || 1;
-  var br = await kinoBrowse(String(catalogId || "peliculas"), String(page));
+  var id = String(catalogId || "peliculas");
+  if (id.indexOf("genres/") === 0 || id.indexOf("tag/") === 0) {
+    return getDiscover({
+      genre: id,
+      type: opts.type || "",
+      year: opts.year || opts.anio || "",
+      page: page,
+    });
+  }
+  var br = await kinoBrowse(id, String(page));
   return {
     items: (br.items || []).map(mapItem).filter(Boolean),
     hasMore: !!br.next,
   };
 }
 
+async function scrapeFichaHtml(html, ref) {
+  var title = "";
+  var h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  if (h1) title = h1[1].replace(/<[^>]+>/g, "").trim();
+  if (!title) {
+    var ogt = html.match(/property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+    if (ogt) title = ogt[1].trim();
+  }
+  var poster = "";
+  var ogi = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+  if (ogi) poster = absUrl(ogi[1]);
+  if (!poster) {
+    var img = html.match(/<img[^>]+class="[^"]*poster[^"]*"[^>]+src="([^"]+)"/i);
+    if (img) poster = absUrl(img[1]);
+  }
+  var backdrop = "";
+  var bg = html.match(/background-image:\s*url\(["']?([^"')]+)["']?\)/i);
+  if (bg) backdrop = absUrl(bg[1]);
+  var overview = "";
+  var ogd = html.match(/property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+  if (ogd) overview = ogd[1].trim();
+  if (!overview) {
+    var syn = html.match(/class="[^"]*(?:synopsis|sinopsis|description|gnrd-syn)[^"]*"[^>]*>([\s\S]*?)<\//i);
+    if (syn) overview = syn[1].replace(/<[^>]+>/g, "").trim();
+  }
+  var year = null;
+  var ym = html.match(/\b((?:19|20)\d{2})\b/);
+  if (ym) year = ym[1];
+  return {
+    title: title,
+    poster: poster,
+    backdrop: backdrop || poster,
+    overview: overview,
+    year: year,
+    ref: ref,
+  };
+}
+
 async function getMeta(id, type) {
   id = String(id || "").trim();
   if (!id) return null;
-  // Aceptar URL completa o slug
+
   var ref = id;
   if (id.indexOf("http") === 0) ref = id;
-  else if (id.indexOf("/ver/") >= 0) ref = id.indexOf("http") === 0 ? id : BASE_URL + (id.charAt(0) === "/" ? id : "/" + id);
+  else if (id.indexOf("/ver/") >= 0) ref = absUrl(id);
   else ref = BASE_URL + "/ver/" + id.replace(/^\/?ver\//, "");
 
-  // Extra desde search: puede venir solo slug
+  var typeHint = String(type || "").toLowerCase();
+  var ficha = { title: "", poster: "", backdrop: "", overview: "", year: null, ref: ref };
+  var list = [];
+  var html = "";
+
   try {
-    // Si parece película y type movie, intentar sin episodios
-    var data = await kinoEpisodes(ref);
-    var list = (data && data.episodes) || [];
-    var series = (data && data.series) || {};
-    if (list.length === 0) {
-      // Ficha de película: un solo "capítulo" = la propia ref
-      return {
-        id: cleanId(id),
-        title: series.title || cleanId(id).replace(/-/g, " "),
-        type: "movie",
-        poster: series.poster || null,
-        overview: series.overview || null,
-        seasons: [],
-        extra: { ref: ref },
-      };
+    html = await fetchHtml(ref);
+    ficha = await scrapeFichaHtml(html, ref);
+    // episodios desde HTML
+    var cardRegex = /<a[^>]*class="[^"]*gnrd-epc[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+    var match;
+    while ((match = cardRegex.exec(html)) !== null) {
+      var fullTag = match[0];
+      var innerHtml = match[1];
+      var hrefMatch = fullTag.match(/href="([^"]+)"/);
+      if (!hrefMatch) continue;
+      var href = absUrl(hrefMatch[1]);
+      var sMatch = fullTag.match(/data-s="([^"]+)"/);
+      var eMatch = fullTag.match(/data-e="([^"]+)"/);
+      var idMatch = fullTag.match(/data-id="([^"]+)"/);
+      var tMatch = fullTag.match(/data-t="([^"]+)"/);
+      var sNum = sMatch ? parseInt(sMatch[1], 10) : 1;
+      var eNum = eMatch ? parseInt(eMatch[1], 10) : 1;
+      var pid = idMatch ? idMatch[1] : "";
+      var tok = tMatch ? tMatch[1] : "";
+      var titleMatch = innerHtml.match(/class="[^"]*gnrd-epc-title[^"]*"[^>]*>([\s\S]*?)<\//i);
+      var title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, "").trim() : "Episodio " + eNum;
+      var imgMatch = innerHtml.match(/background-image:\s*url\(["']?([^"')]+)["']?\)/i);
+      var still = imgMatch ? absUrl(imgMatch[1]) : "";
+      var epRef = href;
+      if (pid && tok) {
+        epRef = href + (href.indexOf("?") >= 0 ? "&" : "?") + "id=" + pid + "&t=" + encodeURIComponent(tok);
+      }
+      list.push({ season: sNum || 1, number: eNum || 1, ref: epRef, title: title, still: still, pid: pid, tok: tok });
     }
-    var seasonsMap = {};
-    var epMap = {};
-    list.forEach(function (ep) {
-      var sn = Number(ep.season || 1) || 1;
-      var n = Number(ep.number || 0) || 0;
-      if (!seasonsMap[sn]) seasonsMap[sn] = [];
-      epMap[sn + ":" + n] = ep.ref;
-      seasonsMap[sn].push({
-        number: n,
-        id: String(ep.ref || n),
-        title: ep.title || ("Episodio " + n),
-        still: ep.still || null,
-      });
-    });
-    try {
-      // cache refs for getStreams
-      globalThis.__gnulaEpMap = globalThis.__gnulaEpMap || {};
-      globalThis.__gnulaEpMap[cleanId(id)] = epMap;
-      globalThis.__gnulaEpMap[ref] = epMap;
-    } catch (e) {}
-    var seasons = Object.keys(seasonsMap)
-      .map(Number)
-      .sort(function (a, b) { return a - b; })
-      .map(function (sn) {
-        return {
-          number: sn,
-          name: "Temporada " + sn,
-          episodes: seasonsMap[sn].sort(function (a, b) { return a.number - b.number; }),
-        };
-      });
-    return {
-      id: cleanId(id),
-      title: series.title || cleanId(id).replace(/-/g, " "),
-      type: "series",
-      poster: series.poster || null,
-      overview: series.overview || null,
-      seasons: seasons,
-      extra: { ref: ref },
-    };
+    list.sort(function (a, b) { return a.season - b.season || a.number - b.number; });
   } catch (e) {
-    kino.log("getMeta: " + ((e && e.message) || e));
-    return {
-      id: cleanId(id),
-      title: cleanId(id).replace(/-/g, " "),
-      type: String(type || "movie"),
-      seasons: [],
-      extra: { ref: ref },
-    };
+    kino.log("getMeta fetch: " + ((e && e.message) || e));
   }
+
+  var titleForTmdb = ficha.title || cleanId(id).replace(/-/g, " ");
+  var isMovieGuess =
+    typeHint === "movie" ||
+    typeHint === "pelicula" ||
+    typeHint === "película" ||
+    (list.length === 0 && typeHint !== "series" && typeHint !== "tv");
+
+  // TMDB enrich
+  var tm = null;
+  try {
+    tm = await tmdbFind(titleForTmdb, isMovieGuess ? "movie" : "series", ficha.year);
+  } catch (e) {
+    kino.log("tmdbFind: " + ((e && e.message) || e));
+  }
+
+  if (tm) {
+    if (!ficha.poster && tm.poster) ficha.poster = tm.poster;
+    if (!ficha.backdrop && tm.backdrop) ficha.backdrop = tm.backdrop;
+    if ((!ficha.overview || ficha.overview.length < 40) && tm.overview) ficha.overview = tm.overview;
+    if (!ficha.year && tm.year) ficha.year = tm.year;
+    if (!ficha.title && tm.title) ficha.title = tm.title;
+    // prefer TMDB poster if site poster is empty or placeholder
+    if (tm.poster && (!ficha.poster || /placeholder|no[-_]?image|default/i.test(ficha.poster))) ficha.poster = tm.poster;
+    if (tm.backdrop) ficha.backdrop = ficha.backdrop || tm.backdrop;
+  }
+
+  // Enriquecer episodios con TMDB stills / títulos
+  if (tm && !tm.isMovie && tm.tmdbId && list.length) {
+    try {
+      var seasonNums = {};
+      list.forEach(function (ep) { seasonNums[ep.season || 1] = true; });
+      var seasonsKeys = Object.keys(seasonNums).map(Number);
+      for (var si = 0; si < seasonsKeys.length && si < 5; si++) {
+        var sn = seasonsKeys[si];
+        var teps = await tmdbSeasonEpisodes(tm.tmdbId, sn);
+        var byNum = {};
+        teps.forEach(function (e) { byNum[e.number] = e; });
+        list.forEach(function (ep) {
+          if (Number(ep.season || 1) !== sn) return;
+          var te = byNum[ep.number];
+          if (!te) return;
+          if (te.still && !ep.still) ep.still = te.still;
+          if (te.title && (!ep.title || /^episodio\s*\d+/i.test(ep.title))) ep.title = te.title;
+          if (te.overview) ep.overview = te.overview;
+        });
+      }
+    } catch (e) {
+      kino.log("tmdb eps: " + ((e && e.message) || e));
+    }
+  }
+
+  var epMap = {};
+  var seasonsMap = {};
+  list.forEach(function (ep) {
+    var sn = Number(ep.season || 1) || 1;
+    var n = Number(ep.number || 0) || 0;
+    if (!seasonsMap[sn]) seasonsMap[sn] = [];
+    epMap[sn + ":" + n] = ep.ref;
+    seasonsMap[sn].push({
+      number: n,
+      id: String(ep.ref || n),
+      title: ep.title || ("Episodio " + n),
+      overview: ep.overview || null,
+      still: ep.still || null,
+    });
+  });
+
+  try {
+    globalThis.__gnulaEpMap = globalThis.__gnulaEpMap || {};
+    globalThis.__gnulaEpMap[cleanId(id)] = epMap;
+    globalThis.__gnulaEpMap[ref] = epMap;
+    // también por slug limpio del path
+    var sm = ref.match(/\/ver\/([^\/\?#]+)/);
+    if (sm) globalThis.__gnulaEpMap[cleanId(sm[1])] = epMap;
+  } catch (e) {}
+
+  var seasons = Object.keys(seasonsMap)
+    .map(Number)
+    .sort(function (a, b) { return a - b; })
+    .map(function (sn) {
+      return {
+        number: sn,
+        name: "Temporada " + sn,
+        episodes: seasonsMap[sn].sort(function (a, b) { return a.number - b.number; }),
+      };
+    });
+
+  var isMovie = isMovieGuess || (list.length === 0 && typeHint !== "series");
+  if (list.length > 0) isMovie = false;
+
+  return {
+    id: cleanId(id),
+    title: ficha.title || cleanId(id).replace(/-/g, " "),
+    type: isMovie ? "movie" : "series",
+    poster: ficha.poster || (tm && tm.poster) || null,
+    backdrop: ficha.backdrop || (tm && tm.backdrop) || ficha.poster || null,
+    overview: ficha.overview || (tm && tm.overview) || null,
+    year: ficha.year || (tm && tm.year) || null,
+    rating: tm && tm.rating != null ? tm.rating : null,
+    tmdbId: tm && tm.tmdbId ? String(tm.tmdbId) : null,
+    seasons: seasons,
+    extra: { ref: ref, tmdbId: tm && tm.tmdbId ? tm.tmdbId : null },
+  };
 }
 
 async function getStreams(id, type, season, episode) {
@@ -723,52 +1236,54 @@ async function getStreams(id, type, season, episode) {
   }
   id = String(id || "").trim();
   var ref = null;
+  var sn = Number(season || 1) || 1;
+  var en = episode != null && episode !== "" ? Number(episode) : null;
 
-  // 1) id ya es URL de episodio con id/t
   if (/id=\d+/.test(id) && /[?&]t=/.test(id)) {
-    ref = id.indexOf("http") === 0 ? id : BASE_URL + (id.charAt(0) === "/" ? id : "/" + id);
+    ref = id.indexOf("http") === 0 ? id : absUrl(id);
   }
 
-  // 2) mapa guardado en getMeta
-  if (!ref && episode != null) {
+  if (!ref && en != null) {
     try {
       var maps = globalThis.__gnulaEpMap || {};
       var key = cleanId(id);
       var epMap = maps[key] || maps[id];
-      var sn = Number(season || 1) || 1;
-      var en = Number(episode) || 1;
       if (epMap && epMap[sn + ":" + en]) ref = epMap[sn + ":" + en];
-      // también probar solo número
       if (!ref && epMap) {
-        var k2 = Object.keys(epMap).filter(function (k) { return k.split(":")[1] === String(en); })[0];
-        if (k2) ref = epMap[k2];
+        var keys = Object.keys(epMap);
+        for (var ki = 0; ki < keys.length; ki++) {
+          if (keys[ki].split(":")[1] === String(en)) {
+            ref = epMap[keys[ki]];
+            break;
+          }
+        }
       }
     } catch (e) {}
   }
 
-  // 3) película / URL de ficha
   if (!ref) {
     if (id.indexOf("http") === 0) ref = id;
-    else if (id.indexOf("/ver/") >= 0) ref = id.indexOf("http") === 0 ? id : BASE_URL + (id.charAt(0) === "/" ? id : "/" + id);
+    else if (id.indexOf("/ver/") >= 0) ref = absUrl(id);
     else ref = BASE_URL + "/ver/" + id.replace(/^\/?ver\//, "");
   }
 
-  // Si es serie y tenemos season/episode pero ref es la ficha, recargar episodios
-  if (episode != null && String(type || "").toLowerCase() !== "movie") {
+  // Serie: asegurar ref de episodio con pid/tok
+  var typeL = String(type || "").toLowerCase();
+  if (en != null && typeL !== "movie" && typeL !== "pelicula") {
     try {
-      var needFetch = !/id=\d+/.test(ref);
-      if (needFetch) {
-        var data = await kinoEpisodes(ref.indexOf("/ver/") >= 0 ? ref : BASE_URL + "/ver/" + cleanId(id));
+      if (!/id=\d+/.test(String(ref))) {
+        var seriesRef = BASE_URL + "/ver/" + cleanId(id);
+        if (id.indexOf("http") === 0) seriesRef = id.split("?")[0];
+        else if (id.indexOf("/ver/") >= 0) seriesRef = absUrl(id).split("?")[0];
+        var data = await kinoEpisodes(seriesRef);
         var list = (data && data.episodes) || [];
-        var sn = Number(season || 1) || 1;
-        var en = Number(episode) || 1;
         for (var i = 0; i < list.length; i++) {
           if (Number(list[i].season) === sn && Number(list[i].number) === en) {
             ref = list[i].ref;
             break;
           }
         }
-        if (!/id=\d+/.test(String(ref)) && list.length) {
+        if (!/id=\d+/.test(String(ref))) {
           for (var j = 0; j < list.length; j++) {
             if (Number(list[j].number) === en) {
               ref = list[j].ref;
@@ -782,13 +1297,52 @@ async function getStreams(id, type, season, episode) {
     }
   }
 
-  try {
-    var servers = await kinoResolve(ref);
-    return Array.isArray(servers) ? servers : [];
-  } catch (e) {
-    kino.log("getStreams: " + ((e && e.message) || e));
-    return [];
+  // Varias pasadas de resolución
+  var servers = [];
+  var seen = {};
+  function merge(list) {
+    (list || []).forEach(function (s) {
+      if (!s || !s.url || seen[s.url]) return;
+      seen[s.url] = true;
+      servers.push(s);
+    });
   }
+
+  try {
+    merge(await kinoResolve(ref));
+  } catch (e) {
+    kino.log("resolve1: " + ((e && e.message) || e));
+  }
+
+  // Si no hay pid en ref, cargar HTML del episodio y reintentar
+  if (!servers.length) {
+    try {
+      var html = await fetchHtml(ref);
+      var pidMatch = html.match(/_gnrdPid\s*=\s*(\d+)/);
+      var tokMatch = html.match(/_gnrdTok\s*=\s*"([^"]+)"/);
+      if (pidMatch && tokMatch) {
+        var ref2 = ref.split("?")[0] + "?id=" + pidMatch[1] + "&t=" + encodeURIComponent(tokMatch[1]);
+        merge(await kinoResolve(ref2));
+      }
+      // data-id / data-t en enlaces de la propia página
+      if (!servers.length) {
+        var dm = html.match(/data-id="(\d+)"[^>]*data-t="([^"]+)"/);
+        if (!dm) dm = html.match(/data-t="([^"]+)"[^>]*data-id="(\d+)"/);
+        if (dm) {
+          var pid = dm[1].length < 8 ? dm[1] : dm[2];
+          var tok = dm[1].length < 8 ? dm[2] : dm[1];
+          if (!/^\d+$/.test(pid)) { pid = dm[2]; tok = dm[1]; }
+          var ref3 = ref.split("?")[0] + "?id=" + pid + "&t=" + encodeURIComponent(tok);
+          merge(await kinoResolve(ref3));
+        }
+      }
+    } catch (e2) {
+      kino.log("resolve2: " + ((e2 && e2.message) || e2));
+    }
+  }
+
+  kino.log("getStreams → " + servers.length + " (" + ref + ")");
+  return servers;
 }
 
 module.exports = {
