@@ -88,8 +88,11 @@ async function tmdbGet(path, params) {
       timeoutMs: 12000,
     });
     if (!res || !res.ok) return null;
-    return res.json();
+    var body = res.json();
+    if (body && typeof body.then === "function") body = await body;
+    return body;
   } catch (e) {
+    kino.log("tmdbGet: " + ((e && e.message) || e));
     return null;
   }
 }
@@ -102,8 +105,9 @@ function tmdbImg(path, size) {
 
 function cleanTitleForTmdb(title) {
   return String(title || "")
+    .replace(/[-_]+/g, " ")
     .replace(/\(\d{4}\)/g, "")
-    .replace(/\b(latino|castellano|subtitulado|sub\s*esp|hd|1080p|720p|4k)\b/gi, "")
+    .replace(/\b(latino|castellano|subtitulado|sub\s*esp|online|gratis|hd|fullhd|1080p|720p|4k|gnula|gnulahd)\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -111,37 +115,69 @@ function cleanTitleForTmdb(title) {
 async function tmdbFind(title, kind, year) {
   var q = cleanTitleForTmdb(title);
   if (!q || q.length < 2) return null;
-  var isMovie = String(kind || "").toLowerCase() === "movie" || String(kind || "").toLowerCase() === "pelicula";
-  var path = isMovie ? "/search/movie" : "/search/tv";
-  var params = { query: q, include_adult: "false" };
-  if (year) params.year = String(year);
-  var data = await tmdbGet(path, params);
-  if (!data || !Array.isArray(data.results) || !data.results.length) {
-    // reintento sin año
-    if (year) {
-      data = await tmdbGet(path, { query: q, include_adult: "false" });
-    }
+  var kindL = String(kind || "").toLowerCase();
+  var isMovie = kindL === "movie" || kindL === "pelicula" || kindL === "película" || kindL === "peliculas";
+  var isTv = kindL === "series" || kindL === "tv" || kindL === "show" || kindL === "anime";
+
+  function pick(results, preferMovie) {
+    if (!results || !results.length) return null;
+    var r = results[0];
+    var movie = preferMovie;
+    if (r.media_type === "movie") movie = true;
+    if (r.media_type === "tv") movie = false;
+    if (r.title && !r.name) movie = true;
+    if (r.name && !r.title) movie = false;
+    return {
+      tmdbId: r.id,
+      isMovie: movie,
+      title: r.title || r.name || q,
+      overview: r.overview || "",
+      poster: tmdbImg(r.poster_path, "w500"),
+      backdrop: tmdbImg(r.backdrop_path, "w1280"),
+      year: String(r.release_date || r.first_air_date || "").slice(0, 4) || null,
+      rating: r.vote_average != null ? Math.round(r.vote_average * 10) / 10 : null,
+    };
   }
-  if (!data || !Array.isArray(data.results) || !data.results.length) {
-    // si falló como serie, probar película y viceversa
-    var alt = isMovie ? "/search/tv" : "/search/movie";
-    data = await tmdbGet(alt, { query: q, include_adult: "false" });
-    if (data && data.results && data.results.length) {
-      isMovie = !isMovie;
-    }
+
+  async function search(path, params) {
+    var data = await tmdbGet(path, params);
+    return data && data.results ? data.results : [];
   }
-  if (!data || !data.results || !data.results.length) return null;
-  var r = data.results[0];
-  return {
-    tmdbId: r.id,
-    isMovie: isMovie || !!r.title,
-    title: r.title || r.name || q,
-    overview: r.overview || "",
-    poster: tmdbImg(r.poster_path, "w500"),
-    backdrop: tmdbImg(r.backdrop_path, "w780"),
-    year: (r.release_date || r.first_air_date || "").slice(0, 4) || null,
-    rating: r.vote_average != null ? Math.round(r.vote_average * 10) / 10 : null,
-  };
+
+  var yearStr = year ? String(year).replace(/\D/g, "").slice(0, 4) : "";
+  var tries = [];
+
+  if (isMovie || !isTv) {
+    var pm = { query: q, include_adult: "false" };
+    if (yearStr) pm.primary_release_year = yearStr;
+    tries.push(search("/search/movie", pm).then(function (r) { return pick(r, true); }));
+  }
+  if (isTv || !isMovie) {
+    var pt = { query: q, include_adult: "false" };
+    if (yearStr) pt.first_air_date_year = yearStr;
+    tries.push(search("/search/tv", pt).then(function (r) { return pick(r, false); }));
+  }
+  // multi sin año
+  tries.push(search("/search/multi", { query: q, include_adult: "false" }).then(function (r) {
+    r = (r || []).filter(function (x) { return x.media_type === "movie" || x.media_type === "tv"; });
+    return pick(r, isMovie);
+  }));
+
+  // sin año si había año
+  if (yearStr) {
+    tries.push(search(isMovie && !isTv ? "/search/movie" : "/search/tv", { query: q, include_adult: "false" }).then(function (r) {
+      return pick(r, isMovie && !isTv);
+    }));
+  }
+
+  for (var i = 0; i < tries.length; i++) {
+    try {
+      var hit = await tries[i];
+      if (hit && (hit.poster || hit.backdrop || hit.overview)) return hit;
+      if (hit) return hit;
+    } catch (e) {}
+  }
+  return null;
 }
 
 async function tmdbTvDetail(tmdbId) {
@@ -722,6 +758,7 @@ async function appSearch(query) {
 
 
 var DISCOVER_GENRES = [
+  { id: "", value: "", label: "Todos", title: "Todos" },
   { id: "genres/drama", value: "genres/drama", label: "Drama", title: "Drama" },
   { id: "genres/accion", value: "genres/accion", label: "Acción", title: "Acción" },
   { id: "genres/comedia", value: "genres/comedia", label: "Comedia", title: "Comedia" },
@@ -871,7 +908,23 @@ var DISCOVER_YEARS = [
   { id: "2019", value: "2019", label: "2019", title: "2019" },
   { id: "2018", value: "2018", label: "2018", title: "2018" },
   { id: "2017", value: "2017", label: "2017", title: "2017" },
-  { id: "2016", value: "2016", label: "2016", title: "2016" }
+  { id: "2016", value: "2016", label: "2016", title: "2016" },
+  { id: "2015", value: "2015", label: "2015", title: "2015" },
+  { id: "2014", value: "2014", label: "2014", title: "2014" },
+  { id: "2013", value: "2013", label: "2013", title: "2013" },
+  { id: "2012", value: "2012", label: "2012", title: "2012" },
+  { id: "2011", value: "2011", label: "2011", title: "2011" },
+  { id: "2010", value: "2010", label: "2010", title: "2010" },
+  { id: "2009", value: "2009", label: "2009", title: "2009" },
+  { id: "2008", value: "2008", label: "2008", title: "2008" },
+  { id: "2007", value: "2007", label: "2007", title: "2007" },
+  { id: "2006", value: "2006", label: "2006", title: "2006" },
+  { id: "2005", value: "2005", label: "2005", title: "2005" },
+  { id: "2004", value: "2004", label: "2004", title: "2004" },
+  { id: "2003", value: "2003", label: "2003", title: "2003" },
+  { id: "2002", value: "2002", label: "2002", title: "2002" },
+  { id: "2001", value: "2001", label: "2001", title: "2001" },
+  { id: "2000", value: "2000", label: "2000", title: "2000" }
 ];
 var DISCOVER_TYPES = [
   { id: "", value: "", label: "Todos", title: "Todos" },
@@ -1034,6 +1087,31 @@ async function getCatalog(catalogId, opts) {
   };
 }
 
+function isSiteJunkImage(url) {
+  var u = String(url || "").toLowerCase();
+  if (!u) return true;
+  // logos / banners genéricos de Gnula, no arte del título
+  if (/logo|organizacion|imagen[-_]?desitio|favicon|wp-content\/uploads\/2026\/05\/imagen|wp-content\/uploads\/2026\/05\/logo/i.test(u)) return true;
+  if (/gnulahd\.nu\/wp-content\/uploads\/[^/]+\/logo/i.test(u)) return true;
+  if (/i[0-9]\.wp\.com\/.*logo/i.test(u)) return true;
+  return false;
+}
+
+function cleanDisplayTitle(title, year) {
+  var s = String(title || "").trim();
+  s = s.replace(/\s*[\|\-–—]\s*Gnula.*$/i, "");
+  s = s.replace(/\s*[\|\-–—]\s*GnulaHD.*$/i, "");
+  s = s.replace(/\s+online\b.*$/i, "");
+  // quitar año del título si viene pegado: "Titulo (2024)" o "Titulo 2024"
+  s = s.replace(/\s*\(\s*((?:19|20)\d{2})\s*\)\s*$/g, "");
+  if (year) {
+    var y = String(year);
+    s = s.replace(new RegExp("\\s*[\\(\\[]?" + y + "[\\)\\]]?\\s*$"), "");
+  }
+  s = s.replace(/\s*[\(\[](?:19|20)\d{2}[\)\]]\s*$/g, "");
+  return s.replace(/\s+/g, " ").trim();
+}
+
 async function scrapeFichaHtml(html, ref) {
   var title = "";
   var h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
@@ -1042,34 +1120,82 @@ async function scrapeFichaHtml(html, ref) {
     var ogt = html.match(/property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
     if (ogt) title = ogt[1].trim();
   }
+  if (!title) {
+    var tit = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (tit) title = tit[1].replace(/<[^>]+>/g, "").split("|")[0].trim();
+  }
+
   var poster = "";
   var ogi = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
   if (ogi) poster = absUrl(ogi[1]);
-  if (!poster) {
+  if (!poster || isSiteJunkImage(poster)) {
     var img = html.match(/<img[^>]+class="[^"]*poster[^"]*"[^>]+src="([^"]+)"/i);
     if (img) poster = absUrl(img[1]);
   }
+  if (isSiteJunkImage(poster)) poster = "";
+
   var backdrop = "";
   var bg = html.match(/background-image:\s*url\(["']?([^"')]+)["']?\)/i);
   if (bg) backdrop = absUrl(bg[1]);
+  if (isSiteJunkImage(backdrop)) backdrop = "";
+
   var overview = "";
-  var ogd = html.match(/property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
-  if (ogd) overview = ogd[1].trim();
+  var syn = html.match(/class="[^"]*(?:synopsis|sinopsis|description|gnrd-syn|gnrd-overview)[^"]*"[^>]*>([\s\S]*?)<\//i);
+  if (syn) overview = syn[1].replace(/<[^>]+>/g, "").trim();
   if (!overview) {
-    var syn = html.match(/class="[^"]*(?:synopsis|sinopsis|description|gnrd-syn)[^"]*"[^>]*>([\s\S]*?)<\//i);
-    if (syn) overview = syn[1].replace(/<[^>]+>/g, "").trim();
+    var ogd = html.match(/property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+    if (ogd) overview = ogd[1].trim();
   }
+  // meta description genérica del sitio no sirve
+  if (overview && /catálogo completo|español latino hd|mejores películas y series/i.test(overview)) overview = "";
+
   var year = null;
-  var ym = html.match(/\b((?:19|20)\d{2})\b/);
+  var ym = html.match(/(?:año|year|estreno)[^0-9]{0,20}((?:19|20)\d{2})/i);
   if (ym) year = ym[1];
+  if (!year) {
+    var ym2 = title.match(/\b((?:19|20)\d{2})\b/);
+    if (ym2) year = ym2[1];
+  }
+
   return {
-    title: title,
+    title: cleanDisplayTitle(title, year),
     poster: poster,
-    backdrop: backdrop || poster,
+    backdrop: backdrop,
     overview: overview,
     year: year,
     ref: ref,
   };
+}
+
+async function tmdbEnrichFull(title, kind, year) {
+  var tm = await tmdbFind(title, kind, year);
+  if (!tm || !tm.tmdbId) return tm;
+
+  // Detalle completo: poster, backdrop y sinopsis oficiales
+  try {
+    var path = tm.isMovie ? ("/movie/" + tm.tmdbId) : ("/tv/" + tm.tmdbId);
+    var det = await tmdbGet(path, {});
+    if (det) {
+      if (det.poster_path) tm.poster = tmdbImg(det.poster_path, "w500");
+      if (det.backdrop_path) tm.backdrop = tmdbImg(det.backdrop_path, "w1280");
+      if (det.overview) tm.overview = det.overview;
+      if (det.release_date) tm.year = String(det.release_date).slice(0, 4);
+      if (det.first_air_date) tm.year = String(det.first_air_date).slice(0, 4);
+      if (det.title || det.name) tm.title = det.title || det.name;
+      if (det.vote_average != null) tm.rating = Math.round(det.vote_average * 10) / 10;
+      // logo oficial si existe
+      try {
+        var imgs = await tmdbGet(path + "/images", { include_image_language: TMDB_LANG + ",null" });
+        if (imgs && Array.isArray(imgs.logos) && imgs.logos.length) {
+          var logo = imgs.logos[0];
+          if (logo && logo.file_path) tm.logo = tmdbImg(logo.file_path, "w500");
+        }
+      } catch (e2) {}
+    }
+  } catch (e) {
+    kino.log("tmdb detail: " + ((e && e.message) || e));
+  }
+  return tm;
 }
 
 async function getMeta(id, type) {
@@ -1089,7 +1215,6 @@ async function getMeta(id, type) {
   try {
     html = await fetchHtml(ref);
     ficha = await scrapeFichaHtml(html, ref);
-    // episodios desde HTML
     var cardRegex = /<a[^>]*class="[^"]*gnrd-epc[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
     var match;
     while ((match = cardRegex.exec(html)) !== null) {
@@ -1121,39 +1246,60 @@ async function getMeta(id, type) {
     kino.log("getMeta fetch: " + ((e && e.message) || e));
   }
 
-  var titleForTmdb = ficha.title || cleanId(id).replace(/-/g, " ");
+  var titleForTmdb = ficha.title || cleanDisplayTitle(cleanId(id).replace(/-/g, " "), null);
+  if (!titleForTmdb || titleForTmdb.length < 2) {
+    titleForTmdb = cleanId(id).replace(/-/g, " ");
+  }
+
   var isMovieGuess =
     typeHint === "movie" ||
     typeHint === "pelicula" ||
     typeHint === "película" ||
-    (list.length === 0 && typeHint !== "series" && typeHint !== "tv");
+    typeHint === "peliculas";
+  if (list.length > 0) isMovieGuess = false;
+  if (typeHint === "series" || typeHint === "tv" || typeHint === "anime") isMovieGuess = false;
 
-  // TMDB enrich
+  // TMDB: búsqueda + detalle (poster/backdrop/sinopsis solo de TMDB)
   var tm = null;
   try {
-    tm = await tmdbFind(titleForTmdb, isMovieGuess ? "movie" : "series", ficha.year);
+    tm = await tmdbEnrichFull(titleForTmdb, isMovieGuess ? "movie" : "series", ficha.year);
   } catch (e) {
-    kino.log("tmdbFind: " + ((e && e.message) || e));
+    kino.log("tmdbEnrich: " + ((e && e.message) || e));
   }
 
+  // Si no encontró, probar el otro tipo
+  if (!tm || (!tm.poster && !tm.backdrop)) {
+    try {
+      var tm2 = await tmdbEnrichFull(titleForTmdb, isMovieGuess ? "series" : "movie", ficha.year);
+      if (tm2 && (tm2.poster || tm2.backdrop || tm2.overview)) tm = tm2;
+    } catch (e) {}
+  }
+
+  // Aplicar SOLO datos TMDB a imágenes y sinopsis
   if (tm) {
-    if (!ficha.poster && tm.poster) ficha.poster = tm.poster;
-    if (!ficha.backdrop && tm.backdrop) ficha.backdrop = tm.backdrop;
-    if ((!ficha.overview || ficha.overview.length < 40) && tm.overview) ficha.overview = tm.overview;
-    if (!ficha.year && tm.year) ficha.year = tm.year;
-    if (!ficha.title && tm.title) ficha.title = tm.title;
-    // prefer TMDB poster if site poster is empty or placeholder
-    if (tm.poster && (!ficha.poster || /placeholder|no[-_]?image|default/i.test(ficha.poster))) ficha.poster = tm.poster;
-    if (tm.backdrop) ficha.backdrop = ficha.backdrop || tm.backdrop;
+    if (tm.poster) ficha.poster = tm.poster;
+    else ficha.poster = ""; // no usar logo del sitio
+    if (tm.backdrop) ficha.backdrop = tm.backdrop;
+    else ficha.backdrop = tm.poster || "";
+    if (tm.overview) ficha.overview = tm.overview;
+    if (tm.year) ficha.year = tm.year;
+    if (tm.title) ficha.title = cleanDisplayTitle(tm.title, tm.year);
+    if (tm.logo) ficha.logo = tm.logo;
+  } else {
+    // sin TMDB: nunca devolver logo basura como poster/backdrop
+    if (isSiteJunkImage(ficha.poster)) ficha.poster = "";
+    if (isSiteJunkImage(ficha.backdrop)) ficha.backdrop = "";
   }
 
-  // Enriquecer episodios con TMDB stills / títulos
+  ficha.title = cleanDisplayTitle(ficha.title, ficha.year);
+
+  // Episodios TMDB
   if (tm && !tm.isMovie && tm.tmdbId && list.length) {
     try {
       var seasonNums = {};
       list.forEach(function (ep) { seasonNums[ep.season || 1] = true; });
       var seasonsKeys = Object.keys(seasonNums).map(Number);
-      for (var si = 0; si < seasonsKeys.length && si < 5; si++) {
+      for (var si = 0; si < seasonsKeys.length && si < 8; si++) {
         var sn = seasonsKeys[si];
         var teps = await tmdbSeasonEpisodes(tm.tmdbId, sn);
         var byNum = {};
@@ -1162,8 +1308,8 @@ async function getMeta(id, type) {
           if (Number(ep.season || 1) !== sn) return;
           var te = byNum[ep.number];
           if (!te) return;
-          if (te.still && !ep.still) ep.still = te.still;
-          if (te.title && (!ep.title || /^episodio\s*\d+/i.test(ep.title))) ep.title = te.title;
+          if (te.still) ep.still = te.still;
+          if (te.title) ep.title = te.title;
           if (te.overview) ep.overview = te.overview;
         });
       }
@@ -1192,7 +1338,6 @@ async function getMeta(id, type) {
     globalThis.__gnulaEpMap = globalThis.__gnulaEpMap || {};
     globalThis.__gnulaEpMap[cleanId(id)] = epMap;
     globalThis.__gnulaEpMap[ref] = epMap;
-    // también por slug limpio del path
     var sm = ref.match(/\/ver\/([^\/\?#]+)/);
     if (sm) globalThis.__gnulaEpMap[cleanId(sm[1])] = epMap;
   } catch (e) {}
@@ -1208,17 +1353,20 @@ async function getMeta(id, type) {
       };
     });
 
-  var isMovie = isMovieGuess || (list.length === 0 && typeHint !== "series");
+  var isMovie = isMovieGuess || (list.length === 0 && typeHint !== "series" && typeHint !== "tv" && typeHint !== "anime");
   if (list.length > 0) isMovie = false;
+  if (tm && tm.isMovie === false) isMovie = false;
+  if (tm && tm.isMovie === true && list.length === 0) isMovie = true;
 
   return {
     id: cleanId(id),
-    title: ficha.title || cleanId(id).replace(/-/g, " "),
+    title: ficha.title || cleanDisplayTitle(cleanId(id).replace(/-/g, " "), ficha.year),
     type: isMovie ? "movie" : "series",
-    poster: ficha.poster || (tm && tm.poster) || null,
-    backdrop: ficha.backdrop || (tm && tm.backdrop) || ficha.poster || null,
-    overview: ficha.overview || (tm && tm.overview) || null,
-    year: ficha.year || (tm && tm.year) || null,
+    poster: ficha.poster || null,
+    backdrop: ficha.backdrop || null,
+    logo: ficha.logo || null,
+    overview: ficha.overview || null,
+    year: ficha.year || null,
     rating: tm && tm.rating != null ? tm.rating : null,
     tmdbId: tm && tm.tmdbId ? String(tm.tmdbId) : null,
     seasons: seasons,
