@@ -871,7 +871,6 @@ async function appSearch(query) {
 
 
 var DISCOVER_GENRES = [
-  { id: "", value: "", label: "Todos", title: "Todos" },
   { id: "genres/drama", value: "genres/drama", label: "Drama", title: "Drama" },
   { id: "genres/accion", value: "genres/accion", label: "Acción", title: "Acción" },
   { id: "genres/comedia", value: "genres/comedia", label: "Comedia", title: "Comedia" },
@@ -1010,7 +1009,6 @@ var DISCOVER_TAGS = [
   { id: "tag/zombie", value: "tag/zombie", label: "Tag: Zombies", title: "Zombies" }
 ];
 var DISCOVER_YEARS = [
-  { id: "", value: "", label: "Todos los años", title: "Todos los años" },
   { id: "2026", value: "2026", label: "2026", title: "2026" },
   { id: "2025", value: "2025", label: "2025", title: "2025" },
   { id: "2024", value: "2024", label: "2024", title: "2024" },
@@ -1040,7 +1038,7 @@ var DISCOVER_YEARS = [
   { id: "2000", value: "2000", label: "2000", title: "2000" }
 ];
 var DISCOVER_TYPES = [
-  { id: "", value: "", label: "Todos", title: "Todos" },
+  { id: "all", value: "all", label: "Todos", title: "Todos", name: "Todos", selected: true },
   { id: "peliculas", value: "peliculas", label: "Películas", title: "Películas" },
   { id: "series", value: "series", label: "Series", title: "Series" },
   { id: "anime", value: "anime", label: "Anime", title: "Anime" },
@@ -1109,13 +1107,28 @@ function buildDiscoverUrl(opts) {
 }
 
 async function getDiscoverFilters(opts) {
-  // 3 filtros: tipo, género, año — opción "Todos" con value vacío
-  var genreOpts = [{ id: "", value: "", label: "Todos", title: "Todos" }]
-    .concat(DISCOVER_GENRES)
-    .concat(DISCOVER_TAGS);
-  var yearOpts = [{ id: "", value: "", label: "Todos", title: "Todos" }].concat(
+  // "Todos" con id/value = "all" (los selects de TV suelen ocultar value="")
+  // En la URL se trata como vacío vía discoverEmpty()
+  var TODOS = {
+    id: "all",
+    value: "all",
+    label: "Todos",
+    title: "Todos",
+    name: "Todos",
+    selected: true,
+  };
+  var genreOpts = [TODOS].concat(
+    DISCOVER_GENRES.filter(function (g) {
+      return g && g.value && g.value !== "all" && g.id !== "" && g.id !== "all";
+    })
+  ).concat(
+    DISCOVER_TAGS.filter(function (t) {
+      return t && t.value && t.value !== "all";
+    })
+  );
+  var yearOpts = [TODOS].concat(
     DISCOVER_YEARS.filter(function (y) {
-      return y && y.value !== "" && y.id !== "";
+      return y && y.value && y.value !== "all" && y.id !== "" && y.id !== "all";
     })
   );
   return [
@@ -1126,6 +1139,7 @@ async function getDiscoverFilters(opts) {
       label: "Tipo",
       title: "Tipo",
       type: "select",
+      defaultValue: "all",
       options: DISCOVER_TYPES,
     },
     {
@@ -1135,6 +1149,7 @@ async function getDiscoverFilters(opts) {
       label: "Género",
       title: "Género",
       type: "select",
+      defaultValue: "all",
       options: genreOpts,
     },
     {
@@ -1144,6 +1159,7 @@ async function getDiscoverFilters(opts) {
       label: "Año",
       title: "Año",
       type: "select",
+      defaultValue: "all",
       options: yearOpts,
     },
   ];
