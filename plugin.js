@@ -265,8 +265,11 @@ function parseCards(html, defaultKind) {
     var href = match[1];
     var title = match[2].trim();
     var body = match[3];
-    if (!/\/ver\//i.test(href)) continue;
-    var slugMatch = href.match(/\/ver\/([^\/\?#]+)/);
+    // /ver/... (catálogo) o /proximos-estrenos/... (slider del home)
+    if (!/\/ver\//i.test(href) && !/\/proximos-estrenos\//i.test(href)) continue;
+    var slugMatch =
+      href.match(/\/ver\/([^\/\?#]+)/) ||
+      href.match(/\/proximos-estrenos\/([^\/\?#]+)/);
     var rawSlug = slugMatch ? slugMatch[1] : href.replace(/^https?:\/\/[^\/]+\//, "");
     var id = cleanId(rawSlug);
     var imgMatch = body.match(/<img[^>]+src="([^"]+)"/i);
@@ -318,7 +321,26 @@ function parseCards(html, defaultKind) {
   return cards;
 }
 
-/** Extrae filas del home (una sola página, sin fetches extra). */
+/** Ids estables para las filas del home (mismo orden que el HTML del sitio). */
+function homeRowMeta(title) {
+  var t = String(title || "").toLowerCase();
+  if (/tendenc/.test(t)) return { id: "tendencias", ref: "tendencias" };
+  if (/novedades/.test(t) && /pel[ií]cula/.test(t))
+    return { id: "movies", ref: "peliculas" };
+  if (/novedades/.test(t) && /serie/.test(t))
+    return { id: "series", ref: "series" };
+  if (/novedades/.test(t) && /anime/.test(t))
+    return { id: "anime", ref: "anime" };
+  if (/reci[eé]n|agregado/.test(t)) return { id: "recent", ref: "peliculas" };
+  if (/pr[oó]ximos|estrenos/.test(t)) return { id: "upcoming", ref: "proximos-estrenos" };
+  if (/terror/.test(t)) return { id: "terror", ref: "genres/terror" };
+  if (/acci[oó]n/.test(t)) return { id: "accion", ref: "genres/accion" };
+  if (/comedia/.test(t)) return { id: "comedia", ref: "genres/comedia" };
+  if (/ciencia/.test(t)) return { id: "ciencia-ficcion", ref: "genres/ciencia-ficcion" };
+  return { id: cleanId(title), ref: cleanId(title) };
+}
+
+/** Extrae filas del home = mismos sliders secundarios del HTML (1 request). */
 function parseHomeRows(html) {
   var rows = [];
   var sectionRe = /<section\s+class="gnrd-row[^"]*"[^>]*>([\s\S]*?)<\/section>/gi;
@@ -330,45 +352,50 @@ function parseHomeRows(html) {
     var title = h2[1].replace(/<[^>]+>/g, "").trim();
     if (!title || /art[ií]culos/i.test(title)) continue;
 
+    // Tendencias: solo el rail de "Esta semana" (no duplicar pane "hoy")
     var railHtml = block;
-    var paneSem = block.match(
-      /data-pane=["']sem["'][^>]*>([\s\S]*?)(?:data-pane=|<\/section>|$)/i
+    var railSem = block.match(
+      /id=["']gnrd-trend-sem["'][^>]*>([\s\S]*?)<\/div>\s*<button[^>]*gnrd-arrow-r/i
     );
-    if (paneSem) railHtml = paneSem[1];
+    if (railSem) {
+      railHtml = railSem[1];
+    } else {
+      var paneSem = block.match(
+        /data-pane=["']sem["'][^>]*>([\s\S]*?)<div class="gnrd-trend-pane"[^>]*data-pane=["']hoy/i
+      );
+      if (paneSem) railHtml = paneSem[1];
+    }
 
-    var items = parseCards(
-      railHtml,
-      /serie|anime/i.test(title) ? "series" : "movie"
-    );
+    var defaultKind = /serie|anime/i.test(title) ? "series" : "movie";
+    var items = parseCards(railHtml, defaultKind);
+    // dedupe por id
+    var seen = {};
+    items = items.filter(function (it) {
+      if (!it || !it.id || seen[it.id]) return false;
+      seen[it.id] = true;
+      return true;
+    });
     if (!items.length) continue;
 
-    var ref = "";
+    var meta = homeRowMeta(title);
     var viewAll = block.match(/class="gnrd-viewall"[^>]*href="([^"]+)"/i);
     if (viewAll) {
       var vu = viewAll[1];
-      if (/\/ver\/peliculas/i.test(vu)) ref = "peliculas";
-      else if (/\/ver\/series/i.test(vu)) ref = "series";
-      else if (/\/ver\/anime/i.test(vu)) ref = "anime";
+      if (/\/ver\/peliculas/i.test(vu)) meta.ref = "peliculas";
+      else if (/\/ver\/series/i.test(vu)) meta.ref = "series";
+      else if (/\/ver\/anime/i.test(vu)) meta.ref = "anime";
+      else if (/proximos-estrenos/i.test(vu)) meta.ref = "proximos-estrenos";
       else if (/\/genres\/([^\/\?#]+)/i.test(vu)) {
-        ref = "genres/" + vu.match(/\/genres\/([^\/\?#]+)/i)[1];
+        meta.ref = "genres/" + vu.match(/\/genres\/([^\/\?#]+)/i)[1];
       }
     }
-    if (!ref) {
-      if (/pel[ií]cula/i.test(title)) ref = "peliculas";
-      else if (/serie/i.test(title)) ref = "series";
-      else if (/anime/i.test(title)) ref = "anime";
-      else if (/terror/i.test(title)) ref = "genres/terror";
-      else if (/acci[oó]n/i.test(title)) ref = "genres/accion";
-      else if (/comedia/i.test(title)) ref = "genres/comedia";
-      else if (/ciencia/i.test(title)) ref = "genres/ciencia-ficcion";
-      else if (/tendenc/i.test(title)) ref = "tendencias";
-      else if (/reci[eé]n|agregado/i.test(title)) ref = "peliculas";
-      else if (/pr[oó]ximos|estrenos/i.test(title)) ref = "peliculas";
-      else ref = cleanId(title);
-    }
 
-    var id = String(ref).replace(/\//g, "-") || cleanId(title);
-    rows.push({ id: id, title: title, ref: ref, items: items });
+    rows.push({
+      id: meta.id,
+      title: title,
+      ref: meta.ref,
+      items: items,
+    });
   }
   return rows;
 }
@@ -781,11 +808,16 @@ async function getHome(opts) {
   if (opts.structureOnly || opts.lightweight) {
     return [
       { id: "featured", title: "Destacados", type: "hero", items: [] },
-      { id: "movies", title: "Películas Recientes", type: "row", items: [] },
-      { id: "series", title: "Series Recientes", type: "row", items: [] },
-      { id: "anime", title: "Anime Reciente", type: "row", items: [] },
+      { id: "tendencias", title: "Tendencias", type: "row", items: [] },
+      { id: "movies", title: "Novedades · Películas", type: "row", items: [] },
+      { id: "series", title: "Novedades · Series", type: "row", items: [] },
+      { id: "anime", title: "Novedades · Anime", type: "row", items: [] },
+      { id: "recent", title: "Recién agregado", type: "row", items: [] },
+      { id: "upcoming", title: "Próximos Estrenos", type: "row", items: [] },
       { id: "terror", title: "Terror · Top Semanal", type: "row", items: [] },
       { id: "accion", title: "Acción · Top Semanal", type: "row", items: [] },
+      { id: "comedia", title: "Comedia · Top Semanal", type: "row", items: [] },
+      { id: "ciencia-ficcion", title: "Ciencia ficción · Top Semanal", type: "row", items: [] },
     ];
   }
   // Carga de una fila (progressive)
@@ -1014,12 +1046,31 @@ var DISCOVER_TYPES = [
   { id: "anime", value: "anime", label: "Anime", title: "Anime" },
 ];
 
+/** "Todos" / vacío → string vacío (no va en la URL). */
+function discoverEmpty(v) {
+  var s = String(v == null ? "" : v).trim();
+  if (!s) return "";
+  var low = s.toLowerCase();
+  if (
+    low === "todos" ||
+    low === "all" ||
+    low === "none" ||
+    low === "cualquier" ||
+    /^todos(\s|$)/i.test(s) ||
+    /^todas(\s|$)/i.test(s)
+  ) {
+    return "";
+  }
+  return s;
+}
+
 function buildDiscoverUrl(opts) {
   opts = opts || {};
-  var type = String(opts.type || opts.filter || opts.tipo || "").trim();
-  var genre = String(opts.genre || opts.genero || opts.category || "").trim();
-  var tag = String(opts.tag || "").trim();
-  var year = String(opts.year || opts.anio || opts.año || "").trim();
+  // "Todos" en tipo / género / año → vacío (no se añade al path ni al query)
+  var type = discoverEmpty(opts.type || opts.filter || opts.tipo || "");
+  var genre = discoverEmpty(opts.genre || opts.genero || opts.category || "");
+  var tag = discoverEmpty(opts.tag || "");
+  var year = discoverEmpty(opts.year || opts.anio || opts.año || "");
   var page = Number(opts.page || 1) || 1;
 
   var path = "";
@@ -1030,6 +1081,7 @@ function buildDiscoverUrl(opts) {
   } else if (tag) {
     path = "/tag/" + tag.replace(/^tag\//, "").replace(/\/$/, "") + "/";
   } else if (genre) {
+    // género concreto
     path = "/genres/" + genre.replace(/^genres\//, "").replace(/\/$/, "") + "/";
   } else if (type === "series") {
     path = "/ver/series/";
@@ -1038,6 +1090,7 @@ function buildDiscoverUrl(opts) {
   } else if (type === "peliculas") {
     path = "/ver/peliculas/";
   } else {
+    // tipo=Todos + género=Todos → catálogo general (películas)
     path = "/ver/peliculas/";
   }
 
@@ -1046,7 +1099,9 @@ function buildDiscoverUrl(opts) {
   }
 
   var qs = [];
+  // solo si hay tipo concreto y estamos en /genres o /tag
   if (type && path.indexOf("/ver/") !== 0) qs.push("type=" + encodeURIComponent(type));
+  // año solo si no es "Todos" (vacío)
   if (year) qs.push("anio=" + encodeURIComponent(year));
   var url = BASE_URL + path;
   if (qs.length) url += "?" + qs.join("&");
@@ -1054,10 +1109,15 @@ function buildDiscoverUrl(opts) {
 }
 
 async function getDiscoverFilters(opts) {
-  // 3 filtros: tipo, género (géneros + tags), año
-  var genreOpts = [{ id: "", value: "", label: "Todos los géneros", title: "Todos los géneros" }]
+  // 3 filtros: tipo, género, año — opción "Todos" con value vacío
+  var genreOpts = [{ id: "", value: "", label: "Todos", title: "Todos" }]
     .concat(DISCOVER_GENRES)
     .concat(DISCOVER_TAGS);
+  var yearOpts = [{ id: "", value: "", label: "Todos", title: "Todos" }].concat(
+    DISCOVER_YEARS.filter(function (y) {
+      return y && y.value !== "" && y.id !== "";
+    })
+  );
   return [
     {
       id: "type",
@@ -1072,8 +1132,8 @@ async function getDiscoverFilters(opts) {
       id: "genre",
       key: "genre",
       name: "genre",
-      label: "Género / Tag",
-      title: "Género / Tag",
+      label: "Género",
+      title: "Género",
       type: "select",
       options: genreOpts,
     },
@@ -1084,7 +1144,7 @@ async function getDiscoverFilters(opts) {
       label: "Año",
       title: "Año",
       type: "select",
-      options: DISCOVER_YEARS,
+      options: yearOpts,
     },
   ];
 }
@@ -1096,15 +1156,17 @@ async function getDiscover(opts) {
     opts = Object.assign({}, opts, opts.filters);
   }
   var page = Number(opts.page || 1) || 1;
-  var type = String(opts.type || opts.filter || opts.tipo || "").trim();
+  var type = discoverEmpty(opts.type || opts.filter || opts.tipo || "");
   // compat: filterId antiguo
   if (!type && opts.filterId) {
     var fid = String(opts.filterId);
     if (fid === "peliculas" || fid === "series" || fid === "anime") type = fid;
     else if (!opts.genre) opts.genre = fid;
   }
-  var genre = String(opts.genre || opts.genero || opts.category || opts.catalogId || "").trim();
-  var year = String(opts.year || opts.anio || opts.año || "").trim();
+  var genre = discoverEmpty(
+    opts.genre || opts.genero || opts.category || opts.catalogId || ""
+  );
+  var year = discoverEmpty(opts.year || opts.anio || opts.año || "");
 
   var url = buildDiscoverUrl({
     type: type,
