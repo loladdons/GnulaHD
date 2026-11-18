@@ -257,20 +257,27 @@ function hashCode(str) {
 function parseCards(html, defaultKind) {
   defaultKind = defaultKind || "movie";
   var cards = [];
-  var cardRegex = /<a class="gnrd-card" href="([^"]+)" title="([^"]+)">([\s\S]*?)<\/a>/g;
+  // Sitio actual: <a class="gnrd-card gnrd-ta" href="..." title="...">
+  var cardRegex =
+    /<a\s+[^>]*class="[^"]*\bgnrd-card\b[^"]*"[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   var match;
   while ((match = cardRegex.exec(String(html || ""))) !== null) {
     var href = match[1];
     var title = match[2].trim();
     var body = match[3];
-    var slugMatch = href.match(/\/ver\/([^\/]+)/);
+    if (!/\/ver\//i.test(href)) continue;
+    var slugMatch = href.match(/\/ver\/([^\/\?#]+)/);
     var rawSlug = slugMatch ? slugMatch[1] : href.replace(/^https?:\/\/[^\/]+\//, "");
     var id = cleanId(rawSlug);
     var imgMatch = body.match(/<img[^>]+src="([^"]+)"/i);
     var poster = imgMatch ? imgMatch[1] : "";
-    var ratingMatch = body.match(/class="gnrd-rating"[^>]*>[^0-9]*([0-9.]+)/i);
+    var ratingMatch =
+      body.match(/class="gnrd-rating"[^>]*>[^0-9]*([0-9.]+)/i) ||
+      body.match(/class="gnrd-cm-rating"[^>]*>[^0-9]*([0-9.]+)/i);
     var rating = ratingMatch ? parseFloat(ratingMatch[1]) : undefined;
-    var yearMatch = body.match(/<span>((?:19|20)\d{2})<\/span>/);
+    var yearMatch =
+      body.match(/gnrd-card-metaline[\s\S]*?<span>((?:19|20)\d{2})<\/span>/i) ||
+      body.match(/<span>((?:19|20)\d{2})<\/span>/);
     var year = yearMatch ? yearMatch[1] : undefined;
     var badges = [];
     var langRe = /class="gnrd-lang"[^>]*>([^<]+)<\/span>/g;
@@ -279,10 +286,23 @@ function parseCards(html, defaultKind) {
       var l = lm[1].trim();
       if (l && badges.indexOf(l) < 0) badges.push(l);
     }
+    var typeBadge = "";
+    var tb = body.match(/class="gnrd-type-badge"[^>]*>([^<]+)</i);
+    if (tb) typeBadge = tb[1].trim().toLowerCase();
+
     var kind = defaultKind;
-    if (/serie/i.test(body) || href.indexOf("/ver/series/") >= 0) kind = "series";
-    else if (href.indexOf("/ver/anime/") >= 0) kind = "series";
-    else if (href.indexOf("/ver/peliculas/") >= 0) kind = "movie";
+    if (
+      typeBadge.indexOf("serie") >= 0 ||
+      typeBadge.indexOf("anime") >= 0 ||
+      /serie/i.test(body) ||
+      /gnrd-epbadge/i.test(body) ||
+      href.indexOf("/ver/series/") >= 0 ||
+      href.indexOf("/ver/anime/") >= 0
+    ) {
+      kind = "series";
+    } else if (typeBadge.indexOf("pel") >= 0 || href.indexOf("/ver/peliculas/") >= 0) {
+      kind = "movie";
+    }
     cards.push({
       id: id,
       ref: absUrl(href),
@@ -296,6 +316,61 @@ function parseCards(html, defaultKind) {
     });
   }
   return cards;
+}
+
+/** Extrae filas del home (una sola página, sin fetches extra). */
+function parseHomeRows(html) {
+  var rows = [];
+  var sectionRe = /<section\s+class="gnrd-row[^"]*"[^>]*>([\s\S]*?)<\/section>/gi;
+  var sm;
+  while ((sm = sectionRe.exec(String(html || ""))) !== null) {
+    var block = sm[1];
+    var h2 = block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
+    if (!h2) continue;
+    var title = h2[1].replace(/<[^>]+>/g, "").trim();
+    if (!title || /art[ií]culos/i.test(title)) continue;
+
+    var railHtml = block;
+    var paneSem = block.match(
+      /data-pane=["']sem["'][^>]*>([\s\S]*?)(?:data-pane=|<\/section>|$)/i
+    );
+    if (paneSem) railHtml = paneSem[1];
+
+    var items = parseCards(
+      railHtml,
+      /serie|anime/i.test(title) ? "series" : "movie"
+    );
+    if (!items.length) continue;
+
+    var ref = "";
+    var viewAll = block.match(/class="gnrd-viewall"[^>]*href="([^"]+)"/i);
+    if (viewAll) {
+      var vu = viewAll[1];
+      if (/\/ver\/peliculas/i.test(vu)) ref = "peliculas";
+      else if (/\/ver\/series/i.test(vu)) ref = "series";
+      else if (/\/ver\/anime/i.test(vu)) ref = "anime";
+      else if (/\/genres\/([^\/\?#]+)/i.test(vu)) {
+        ref = "genres/" + vu.match(/\/genres\/([^\/\?#]+)/i)[1];
+      }
+    }
+    if (!ref) {
+      if (/pel[ií]cula/i.test(title)) ref = "peliculas";
+      else if (/serie/i.test(title)) ref = "series";
+      else if (/anime/i.test(title)) ref = "anime";
+      else if (/terror/i.test(title)) ref = "genres/terror";
+      else if (/acci[oó]n/i.test(title)) ref = "genres/accion";
+      else if (/comedia/i.test(title)) ref = "genres/comedia";
+      else if (/ciencia/i.test(title)) ref = "genres/ciencia-ficcion";
+      else if (/tendenc/i.test(title)) ref = "tendencias";
+      else if (/reci[eé]n|agregado/i.test(title)) ref = "peliculas";
+      else if (/pr[oó]ximos|estrenos/i.test(title)) ref = "peliculas";
+      else ref = cleanId(title);
+    }
+
+    var id = String(ref).replace(/\//g, "-") || cleanId(title);
+    rows.push({ id: id, title: title, ref: ref, items: items });
+  }
+  return rows;
 }
 
 function parseHeroSlides(html) {
@@ -325,7 +400,14 @@ function parseHeroSlides(html) {
     var year = yearMatch ? yearMatch[1] : undefined;
     var ratingMatch = block.match(/class="gnrd-m-rating"[^>]*>[^0-9]*([0-9.]+)/i);
     var rating = ratingMatch ? parseFloat(ratingMatch[1]) : undefined;
-    var isSeries = /serie/i.test(block) || /temporada/i.test(block);
+    var eyebrow = "";
+    var eb = block.match(/class="gnrd-eyebrow"[^>]*>([^<]+)</i);
+    if (eb) eyebrow = eb[1].trim().toLowerCase();
+    var isSeries =
+      /serie/i.test(eyebrow) ||
+      /anime/i.test(eyebrow) ||
+      /serie/i.test(block) ||
+      /temporada/i.test(block);
     var kind = isSeries ? "series" : "movie";
     var slugMatch = ref.match(/\/ver\/([^\/\?#]+)/);
     var id = cleanId(slugMatch ? slugMatch[1] : ref);
@@ -437,20 +519,9 @@ async function kinoSearch(query) {
 }
 
 async function kinoHome() {
+  // Una sola petición: hero + todos los rails del home (mucho más rápido)
   var homeHtml = await fetchHtml(BASE_URL + "/");
   var heroSlides = parseHeroSlides(homeHtml);
-  var pages = await Promise.all([
-    fetchHtml(BASE_URL + "/ver/peliculas/").catch(function () { return ""; }),
-    fetchHtml(BASE_URL + "/ver/series/").catch(function () { return ""; }),
-    fetchHtml(BASE_URL + "/ver/anime/").catch(function () { return ""; }),
-    fetchHtml(BASE_URL + "/genres/terror/").catch(function () { return ""; }),
-    fetchHtml(BASE_URL + "/genres/accion/").catch(function () { return ""; }),
-  ]);
-  var movieItems = parseCards(pages[0], "movie");
-  var seriesItems = parseCards(pages[1], "series");
-  var animeItems = parseCards(pages[2], "series");
-  var terrorItems = parseCards(pages[3], "movie");
-  var accionItems = parseCards(pages[4], "movie");
   var rows = [];
   if (heroSlides.length) {
     rows.push({
@@ -460,31 +531,32 @@ async function kinoHome() {
       items: heroSlides,
     });
   }
-  rows.push({ id: "movies", title: "Películas Recientes", ref: "peliculas", items: movieItems });
-  rows.push({ id: "series", title: "Series Recientes", ref: "series", items: seriesItems });
-  rows.push({ id: "anime", title: "Anime Reciente", ref: "anime", items: animeItems });
-  if (terrorItems.length) rows.push({ id: "terror", title: "Terror · Top Semanal", ref: "genres/terror", items: terrorItems });
-  if (accionItems.length) rows.push({ id: "accion", title: "Acción · Top Semanal", ref: "genres/accion", items: accionItems });
-  // Enriquecer con TMDB solo tarjetas sin poster (máx 12, no bloquea el home entero)
-  try {
-    var need = [];
-    rows.forEach(function (row) {
-      (row.items || []).forEach(function (it) {
-        if (it && !it.poster && need.length < 12) need.push(it);
-      });
-    });
-    for (var ni = 0; ni < need.length; ni++) {
-      try {
-        var tm = await tmdbFind(need[ni].title, need[ni].kind || need[ni].type, need[ni].year);
-        if (tm) {
-          if (tm.poster) need[ni].poster = tm.poster;
-          if (tm.backdrop) need[ni].backdrop = tm.backdrop;
-          if (tm.overview) need[ni].overview = tm.overview;
-          if (tm.year && !need[ni].year) need[ni].year = tm.year;
-        }
-      } catch (e) {}
+  var homeRows = parseHomeRows(homeHtml);
+  for (var i = 0; i < homeRows.length; i++) {
+    rows.push(homeRows[i]);
+  }
+  // Fallback si el HTML del home no trae rails (poco probable)
+  if (rows.length <= 1) {
+    try {
+      var pages = await Promise.all([
+        fetchHtml(BASE_URL + "/ver/peliculas/").catch(function () { return ""; }),
+        fetchHtml(BASE_URL + "/ver/series/").catch(function () { return ""; }),
+        fetchHtml(BASE_URL + "/ver/anime/").catch(function () { return ""; }),
+      ]);
+      var movieItems = parseCards(pages[0], "movie");
+      var seriesItems = parseCards(pages[1], "series");
+      var animeItems = parseCards(pages[2], "series");
+      if (movieItems.length)
+        rows.push({ id: "movies", title: "Películas Recientes", ref: "peliculas", items: movieItems });
+      if (seriesItems.length)
+        rows.push({ id: "series", title: "Series Recientes", ref: "series", items: seriesItems });
+      if (animeItems.length)
+        rows.push({ id: "anime", title: "Anime Reciente", ref: "anime", items: animeItems });
+    } catch (e) {
+      kino.log("kinoHome fallback: " + ((e && e.message) || e));
     }
-  } catch (e) {}
+  }
+  // Sin TMDB en home: los posters ya vienen del sitio y ralentizaba mucho
   return rows;
 }
 
@@ -493,29 +565,38 @@ async function kinoBrowse(ref, cursor) {
   var url = "";
   var defaultKind = "movie";
   ref = String(ref || "");
+  function paged(base) {
+    base = base.replace(/\/?$/, "/");
+    if (page > 1) return base + "page/" + page + "/";
+    return base;
+  }
   if (ref === "peliculas" || ref === "movies") {
-    url = BASE_URL + "/ver/peliculas/?page=" + page;
+    url = paged(BASE_URL + "/ver/peliculas/");
     defaultKind = "movie";
   } else if (ref === "series") {
-    url = BASE_URL + "/ver/series/?page=" + page;
+    url = paged(BASE_URL + "/ver/series/");
     defaultKind = "series";
   } else if (ref === "anime") {
-    url = BASE_URL + "/ver/anime/?page=" + page;
+    url = paged(BASE_URL + "/ver/anime/");
     defaultKind = "series";
-  } else if (ref === "destacados" || ref === "featured") {
+  } else if (ref === "destacados" || ref === "featured" || ref === "tendencias") {
     var homeHtml = await fetchHtml(BASE_URL + "/");
     return { items: parseHeroSlides(homeHtml), next: null };
   } else if (ref.indexOf("genres/") === 0 || ref.indexOf("generos/") === 0) {
     var slug = ref.replace(/^(genres|generos)\//, "").replace(/\/$/, "");
-    url = BASE_URL + "/genres/" + slug + "/?page=" + page;
+    url = paged(BASE_URL + "/genres/" + slug + "/");
   } else if (ref.indexOf("http") === 0) {
-    url = ref.indexOf("?") >= 0 ? ref + "&page=" + page : ref + "?page=" + page;
+    var base = ref.split("?")[0].replace(/\/page\/\d+\/?$/, "/");
+    url = page > 1 ? base.replace(/\/?$/, "/") + "page/" + page + "/" : base;
   } else {
-    url = BASE_URL + "/genres/" + ref + "/?page=" + page;
+    url = paged(BASE_URL + "/genres/" + ref + "/");
   }
   var html = await fetchHtml(url);
   var items = parseCards(html, defaultKind);
-  var hasNext = html.indexOf("page=" + (page + 1)) >= 0 || items.length >= 40;
+  var hasNext =
+    new RegExp("/page/" + (page + 1) + "/").test(html) ||
+    html.indexOf("page=" + (page + 1)) >= 0 ||
+    items.length >= 24;
   return { items: items, next: hasNext ? String(page + 1) : null };
 }
 
